@@ -35,6 +35,23 @@ export function registerReadTools(server: McpServer) {
   );
 
   server.tool(
+    "gmail_download_attachment",
+    "Download an email attachment to disk. Use attachmentId from gmail_get_message response. Returns the saved file path and metadata.",
+    {
+      messageId: z.string().describe("The message ID containing the attachment"),
+      attachmentId: z.string().describe("The attachment ID (from gmail_get_message attachments array)"),
+      filename: z.string().describe("Filename for the saved attachment"),
+      savePath: z.string().optional().describe("Absolute path to save the file (defaults to /tmp/<filename>)"),
+    },
+    async (params) => {
+      const result = await gmail.getAttachment(params);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  server.tool(
     "gmail_list_labels",
     "List all Gmail labels (INBOX, SENT, custom labels). Useful for discovering label IDs to filter messages.",
     {},

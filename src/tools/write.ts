@@ -12,6 +12,7 @@ export function registerWriteTools(server: McpServer) {
       body: z.string().describe("Email body text (plain text)"),
       cc: z.string().optional().describe("CC recipients, comma-separated"),
       bcc: z.string().optional().describe("BCC recipients, comma-separated"),
+      attachments: z.array(z.string()).optional().describe("Absolute file paths to attach"),
     },
     async (params) => {
       const result = await gmail.sendMessage(params);
@@ -30,6 +31,7 @@ export function registerWriteTools(server: McpServer) {
       body: z.string().describe("Email body text (plain text)"),
       cc: z.string().optional().describe("CC recipients, comma-separated"),
       bcc: z.string().optional().describe("BCC recipients, comma-separated"),
+      attachments: z.array(z.string()).optional().describe("Absolute file paths to attach"),
     },
     async (params) => {
       const result = await gmail.createDraft(params);
@@ -45,9 +47,10 @@ export function registerWriteTools(server: McpServer) {
     {
       messageId: z.string().describe("The message ID to reply to (from gmail_list_messages or gmail_get_message)"),
       body: z.string().describe("Reply body text (plain text)"),
+      attachments: z.array(z.string()).optional().describe("Absolute file paths to attach"),
     },
-    async ({ messageId, body }) => {
-      const result = await gmail.replyToMessage(messageId, body);
+    async ({ messageId, body, attachments }) => {
+      const result = await gmail.replyToMessage(messageId, body, attachments);
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       };

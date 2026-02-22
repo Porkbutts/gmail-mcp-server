@@ -1,5 +1,7 @@
 import { gmail_v1 } from "googleapis";
 import { getGmailClient } from "../auth.js";
+import * as fs from "fs";
+import * as path from "path";
 
 let gmail: gmail_v1.Gmail;
 
@@ -77,16 +79,17 @@ function extractBody(payload: gmail_v1.Schema$MessagePart | undefined): string {
 
 function extractAttachments(
   payload: gmail_v1.Schema$MessagePart | undefined
-): Array<{ filename: string; mimeType: string; size: number }> {
-  const attachments: Array<{ filename: string; mimeType: string; size: number }> = [];
+): Array<{ filename: string; mimeType: string; size: number; attachmentId: string }> {
+  const attachments: Array<{ filename: string; mimeType: string; size: number; attachmentId: string }> = [];
   if (!payload?.parts) return attachments;
 
   for (const part of payload.parts) {
-    if (part.filename && part.filename.length > 0) {
+    if (part.filename && part.filename.length > 0 && part.body?.attachmentId) {
       attachments.push({
         filename: part.filename,
         mimeType: part.mimeType ?? "application/octet-stream",
         size: part.body?.size ?? 0,
+        attachmentId: part.body.attachmentId,
       });
     }
     // Recurse
@@ -99,6 +102,34 @@ function extractAttachments(
 }
 
 // --- API Functions ---
+
+export async function getAttachment(options: {
+  messageId: string;
+  attachmentId: string;
+  filename: string;
+  savePath?: string;
+}) {
+  const { messageId, attachmentId, filename } = options;
+  const outputPath = options.savePath ?? path.join("/tmp", filename);
+
+  const res = await client().users.messages.attachments.get({
+    userId: "me",
+    messageId,
+    id: attachmentId,
+  });
+
+  const data = res.data.data;
+  if (!data) throw new Error("Attachment data is empty");
+
+  const buffer = Buffer.from(data, "base64url");
+  fs.writeFileSync(outputPath, buffer);
+
+  return {
+    filePath: outputPath,
+    filename,
+    size: buffer.length,
+  };
+}
 
 export async function listMessages(options: {
   query?: string;
@@ -182,21 +213,99 @@ function buildRawMessage(options: {
   inReplyTo?: string;
   references?: string;
   threadSubject?: string;
+  attachments?: string[];
 }): string {
+  const hasAttachments = options.attachments && options.attachments.length > 0;
+
+  if (!hasAttachments) {
+    const lines: string[] = [];
+    lines.push(`To: ${options.to}`);
+    if (options.cc) lines.push(`Cc: ${options.cc}`);
+    if (options.bcc) lines.push(`Bcc: ${options.bcc}`);
+    lines.push(`Subject: ${options.threadSubject ?? options.subject}`);
+    lines.push("Content-Type: text/plain; charset=utf-8");
+    if (options.inReplyTo) {
+      lines.push(`In-Reply-To: ${options.inReplyTo}`);
+      lines.push(`References: ${options.references ?? options.inReplyTo}`);
+    }
+    lines.push("");
+    lines.push(options.body);
+    return encodeBase64Url(lines.join("\r\n"));
+  }
+
+  const boundary = `boundary_${Date.now()}_${Math.random().toString(36).slice(2)}`;
   const lines: string[] = [];
   lines.push(`To: ${options.to}`);
   if (options.cc) lines.push(`Cc: ${options.cc}`);
   if (options.bcc) lines.push(`Bcc: ${options.bcc}`);
   lines.push(`Subject: ${options.threadSubject ?? options.subject}`);
-  lines.push("Content-Type: text/plain; charset=utf-8");
+  lines.push("MIME-Version: 1.0");
   if (options.inReplyTo) {
     lines.push(`In-Reply-To: ${options.inReplyTo}`);
     lines.push(`References: ${options.references ?? options.inReplyTo}`);
   }
+  lines.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+  lines.push("");
+
+  // Text body part
+  lines.push(`--${boundary}`);
+  lines.push("Content-Type: text/plain; charset=utf-8");
   lines.push("");
   lines.push(options.body);
+  lines.push("");
 
+  // Attachment parts
+  for (const filePath of options.attachments!) {
+    const filename = path.basename(filePath);
+    const content = fs.readFileSync(filePath);
+    const encoded = content.toString("base64");
+    const mimeType = guessMimeType(filename);
+
+    lines.push(`--${boundary}`);
+    lines.push(`Content-Type: ${mimeType}; name="${filename}"`);
+    lines.push("Content-Transfer-Encoding: base64");
+    lines.push(`Content-Disposition: attachment; filename="${filename}"`);
+    lines.push("");
+    // Split base64 into 76-char lines per MIME spec
+    for (let i = 0; i < encoded.length; i += 76) {
+      lines.push(encoded.slice(i, i + 76));
+    }
+    lines.push("");
+  }
+
+  lines.push(`--${boundary}--`);
   return encodeBase64Url(lines.join("\r\n"));
+}
+
+function guessMimeType(filename: string): string {
+  const ext = path.extname(filename).toLowerCase();
+  const types: Record<string, string> = {
+    ".pdf": "application/pdf",
+    ".zip": "application/zip",
+    ".gz": "application/gzip",
+    ".tar": "application/x-tar",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+    ".html": "text/html",
+    ".json": "application/json",
+    ".xml": "application/xml",
+    ".mp3": "audio/mpeg",
+    ".mp4": "video/mp4",
+    ".wav": "audio/wav",
+  };
+  return types[ext] ?? "application/octet-stream";
 }
 
 export async function sendMessage(options: {
@@ -205,6 +314,7 @@ export async function sendMessage(options: {
   body: string;
   cc?: string;
   bcc?: string;
+  attachments?: string[];
 }) {
   const raw = buildRawMessage(options);
   const res = await client().users.messages.send({
@@ -221,6 +331,7 @@ export async function createDraft(options: {
   body: string;
   cc?: string;
   bcc?: string;
+  attachments?: string[];
 }) {
   const raw = buildRawMessage(options);
   const res = await client().users.drafts.create({
@@ -233,7 +344,7 @@ export async function createDraft(options: {
   return { id: res.data.id, messageId: res.data.message?.id };
 }
 
-export async function replyToMessage(messageId: string, body: string) {
+export async function replyToMessage(messageId: string, body: string, attachments?: string[]) {
   // Get the original message to extract threading headers
   const original = await client().users.messages.get({
     userId: "me",
@@ -255,6 +366,7 @@ export async function replyToMessage(messageId: string, body: string) {
     inReplyTo: originalMessageId,
     references: references ? `${references} ${originalMessageId}` : originalMessageId,
     threadSubject: subject.startsWith("Re:") ? subject : `Re: ${subject}`,
+    attachments,
   });
 
   const res = await client().users.messages.send({
